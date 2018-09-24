@@ -2,4 +2,8 @@ checkpoint/
 output/
 logs/
 model/
+datasets/test/
 *.pyc
+*.jpg
+*.jpeg
+*.png

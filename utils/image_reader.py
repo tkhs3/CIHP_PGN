@@ -63,6 +63,12 @@ def resize_img_labels(image, label, resized_h, resized_w):
     label = tf.squeeze(label, squeeze_dims=[0])
     return img, label
 
+def resize_img(image, resized_h, resized_w):
+
+    new_shape = tf.stack([tf.to_int32(resized_h), tf.to_int32(resized_w)])
+    img = tf.image.resize_images(image, new_shape, preserve_aspect_ratio=True)
+    return img
+
 def random_crop_and_pad_image_and_labels(image, label, edge, crop_h, crop_w, ignore_label=255):
     """
     Randomly crop and pads the input images.
@@ -148,6 +154,21 @@ def read_labeled_image_list(data_dir, data_list):
         masks.append(data_dir + mask)
     return images, masks
 
+def read_image_list(data_dir, data_list):
+    """Reads txt file containing paths to images and ground truth masks.
+    
+    Args:
+      data_list: path to the file with lines of the form '/path/to/image /path/to/mask'.
+       
+    Returns:
+      a lists with all file names for images and masks, respectively.
+    """
+    f = open(data_list, 'r')
+    images = []
+    for line in f:
+        images.append(data_dir + line.strip("\n"))
+    return images
+
 def read_edge_list(data_dir, data_id_list):
     f = open(data_id_list, 'r')
     edges = []
@@ -172,35 +193,44 @@ def read_images_from_disk(input_queue, input_size, random_scale, random_mirror=F
       Two tensors: the decoded image and its mask.
     """
 
-    img_contents = tf.read_file(input_queue[0])
-    label_contents = tf.read_file(input_queue[1])
-    edge_contents = tf.read_file(input_queue[2])
+    dict_data = {}
+    list_name_data = ["image", "label", "edge"]
+    for idx_queus in range(len(input_queue)) :
+        dict_data[list_name_data[idx_queus]] =  tf.read_file(input_queue[idx_queus])    
 
-    
-    img = tf.image.decode_jpeg(img_contents, channels=3)
+   
+    img = tf.image.decode_jpeg(dict_data["image"], channels=3)
     img_r, img_g, img_b = tf.split(value=img, num_or_size_splits=3, axis=2)
     img = tf.cast(tf.concat([img_b, img_g, img_r], 2), dtype=tf.float32)
     # Extract mean.
     img -= IMG_MEAN
-    label = tf.image.decode_png(label_contents, channels=1)
-    edge = tf.image.decode_png(edge_contents, channels=1)
 
-    if input_size is not None:
-        h, w = input_size
+    if len(input_queue) == 1 :
+        if input_size is not None:
+            h_target, w_target = input_size
+            img = resize_img(img, h_target, w_target)
+        return img
 
-        # Randomly scale the images and labels.
-        if random_scale:
-            img, label, edge = image_scaling(img, label, edge)
+    else:
+        label = tf.image.decode_png(label_contents, channels=1)
+        edge = tf.image.decode_png(edge_contents, channels=1)
 
-        # Randomly mirror the images and labels.
-        if random_mirror:
-            img, label, edge = image_mirroring(img, label, edge)
+        if input_size is not None:
+            h, w = input_size
 
-        # Randomly crops the images and labels.
-        img, label, edge = random_crop_and_pad_image_and_labels(img, label, edge, h, w, IGNORE_LABEL)
+            # Randomly scale the images and labels.
+            if random_scale:
+                img, label, edge = image_scaling(img, label, edge)
+
+            # Randomly mirror the images and labels.
+            if random_mirror:
+                img, label, edge = image_mirroring(img, label, edge)
+
+            # Randomly crops the images and labels.
+            img, label, edge = random_crop_and_pad_image_and_labels(img, label, edge, h, w, IGNORE_LABEL)
 
 
-    return img, label, edge
+        return img, label, edge
 
 class ImageReader(object):
     '''Generic ImageReader which reads images and corresponding segmentation
@@ -208,7 +238,7 @@ class ImageReader(object):
     '''
 
     def __init__(self, data_dir, data_list, data_id_list, input_size, random_scale,
-                 random_mirror, shuffle, coord):
+                 random_mirror, shuffle, coord, is_inference=True):
         '''Initialise an ImageReader.
         
         Args:
@@ -225,15 +255,23 @@ class ImageReader(object):
         self.data_id_list = data_id_list
         self.input_size = input_size
         self.coord = coord
+        self.is_inference = is_inference
 
-
-        self.image_list, self.label_list = read_labeled_image_list(self.data_dir, self.data_list)
-        self.edge_list = read_edge_list(self.data_dir, self.data_id_list)
-        self.images = tf.convert_to_tensor(self.image_list, dtype=tf.string)
-        self.labels = tf.convert_to_tensor(self.label_list, dtype=tf.string)
-        self.edges = tf.convert_to_tensor(self.edge_list, dtype=tf.string)
-        self.queue = tf.train.slice_input_producer([self.images, self.labels, self.edges], shuffle=shuffle) 
-        self.image, self.label, self.edge = read_images_from_disk(self.queue, self.input_size, random_scale, random_mirror) 
+        if self.is_inference :
+            self.image_list = read_image_list(self.data_dir, self.data_list)
+            self.images = tf.convert_to_tensor(self.image_list, dtype=tf.string)
+            self.queue = tf.train.slice_input_producer([self.images], shuffle=shuffle) 
+            self.image = read_images_from_disk(self.queue, self.input_size, random_scale, random_mirror) 
+            
+        else:    
+            self.image_list, self.label_list = read_labeled_image_list(self.data_dir, self.data_list)
+            self.edge_list = read_edge_list(self.data_dir, self.data_id_list)
+            self.edge_list = self.image_list
+            self.images = tf.convert_to_tensor(self.image_list, dtype=tf.string)
+            self.labels = tf.convert_to_tensor(self.label_list, dtype=tf.string)
+            self.edges = tf.convert_to_tensor(self.edge_list, dtype=tf.string)
+            self.queue = tf.train.slice_input_producer([self.images, self.labels, self.edges], shuffle=shuffle) 
+            self.image, self.label, self.edge = read_images_from_disk(self.queue, self.input_size, random_scale, random_mirror) 
 
     def dequeue(self, num_elements):
         '''Pack images and labels into a batch.
@@ -243,6 +281,13 @@ class ImageReader(object):
           
         Returns:
           Two tensors of size (batch_size, h, w, {3, 1}) for images and masks.'''
-        batch_list = [self.image, self.label, self.edge]
-        image_batch, label_batch, edge_batch = tf.train.batch([self.image, self.label, self.edge], num_elements)
-        return image_batch, label_batch, edge_batch
+
+        if self.is_inference :
+            batch_list = [self.image]
+            image_batch = tf.train.batch([self.image], num_elements)
+            return image_batch
+
+        else :
+            batch_list = [self.image, self.label, self.edge]
+            image_batch, label_batch, edge_batch = tf.train.batch([self.image, self.label, self.edge], num_elements)
+            return image_batch, label_batch, edge_batch
